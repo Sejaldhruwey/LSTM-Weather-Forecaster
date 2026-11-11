@@ -1,51 +1,106 @@
+
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
-import joblib
+
+
+FEATURES = ["T", "rh", "p", "wv", "SWDR"]
+TARGET = ["T"]
+
 
 def load_and_clean_data(file_path):
-    """Loads and preprocesses raw weather data."""
+    """Load, validate, and clean weather data."""
+
     df = pd.read_csv(file_path)
-    df['date'] = pd.to_datetime(df['date'])
-    df.set_index('date', inplace=True)
-    
-    # Select key weather features
-    features = ['T', 'rh', 'p', 'wv', 'SWDR']
-    df = df[features]
-    
-    # Handle missing values
-    df.ffill(inplace=True)
-    df.bfill(inplace=True)
-    
+
+    required_columns = ["date"] + FEATURES
+    missing_columns = [
+        col for col in required_columns if col not in df.columns
+    ]
+
+    if missing_columns:
+        raise ValueError(
+            f"Missing required columns: {missing_columns}"
+        )
+
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date"])
+    df = df.sort_values("date")
+    df = df.drop_duplicates(subset="date", keep="first")
+    df = df.set_index("date")
+
+    df = df[FEATURES].apply(pd.to_numeric, errors="coerce")
+
+    # Replace invalid sentinel values.
+    df = df.replace(-9999, np.nan)
+
+    # Fill missing values using time-based interpolation.
+    df = df.interpolate(method="time").ffill()
+
+    if df.isnull().any().any():
+        raise ValueError("Dataset still contains missing values.")
+
     return df
 
-def scale_data(df, save_path_x='scaler_x.pkl', save_path_y='scaler_y.pkl'):
-    """Fits MinMaxScaler and scales features and targets."""
-    features = ['T', 'rh', 'p', 'wv', 'SWDR']
-    
+
+def prepare_train_test_data(
+    df,
+    train_ratio=0.8,
+    sequence_length=144,
+    forecast_horizon=144
+):
+    """
+    Split data chronologically, fit scalers only on training data,
+    and generate sequences for training and testing.
+    """
+
+    if not 0 < train_ratio < 1:
+        raise ValueError("train_ratio must be between 0 and 1.")
+
+    if len(df) <= sequence_length + forecast_horizon:
+        raise ValueError("Not enough observations to create sequences.")
+
+    split_index = int(len(df) * train_ratio)
+
+    # Fit scalers only on the training period.
+    train_df = df.iloc[:split_index]
+
     scaler_x = MinMaxScaler()
     scaler_y = MinMaxScaler()
-    
-    scaled_features = scaler_x.fit_transform(df[features])
-    scaled_target = scaler_y.fit_transform(df[['T']])
-    
-    joblib.dump(scaler_x, save_path_x)
-    joblib.dump(scaler_y, save_path_y)
-    
-    return scaled_features, scaled_target, scaler_x, scaler_y
 
-def create_sliding_windows(scaled_features, scaled_target, sequence_length=144, forecast_horizon=144):
-    """Creates input sequences (X) and corresponding future target values (y)."""
-    X, y = [], []
-    for i in range(len(scaled_features) - sequence_length - forecast_horizon + 1):
-        X.append(scaled_features[i : i + sequence_length])
-        y.append(scaled_target[i + sequence_length + forecast_horizon - 1])
-        
-    return np.array(X), np.array(y)
+    scaler_x.fit(train_df[FEATURES])
+    scaler_y.fit(train_df[TARGET])
 
-if __name__ == '__main__':
-    df = load_and_clean_data('cleaned_weather.csv')
-    scaled_features, scaled_target, _, _ = scale_data(df)
-    X, y = create_sliding_windows(scaled_features, scaled_target)
-    print(f"Features shape: {X.shape}")
-    print(f"Targets shape: {y.shape}")
+    # Transform the complete dataset using training-fitted scalers.
+    scaled_features = scaler_x.transform(df[FEATURES])
+    scaled_target = scaler_y.transform(df[TARGET])
+
+    X_train, y_train = [], []
+    X_test, y_test = [], []
+
+    # Generate sequences using their target positions.
+    first_target = sequence_length + forecast_horizon - 1
+
+    for target_index in range(first_target, len(df)):
+
+        start_index = target_index - sequence_length - forecast_horizon + 1
+        end_index = start_index + sequence_length
+
+        X_sequence = scaled_features[start_index:end_index]
+        y_value = scaled_target[target_index]
+
+        if target_index < split_index:
+            X_train.append(X_sequence)
+            y_train.append(y_value)
+        else:
+            X_test.append(X_sequence)
+            y_test.append(y_value)
+
+    return (
+        np.array(X_train),
+        np.array(y_train),
+        np.array(X_test),
+        np.array(y_test),
+        scaler_x,
+        scaler_y
+    )
