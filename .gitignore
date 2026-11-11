@@ -15,3 +15,13 @@ env/
 # OS specific files
 .DS_Store
 Thumbs.db
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# Testing and temporary files
+.pytest_cache/
+*.log
+
+# Editor settings
+.vscode/
